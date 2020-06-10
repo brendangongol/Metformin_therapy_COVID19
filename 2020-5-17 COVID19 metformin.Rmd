@@ -1,0 +1,950 @@
+---
+title: "COVID19 metformin"
+author: ''
+date: "May 17, 2020"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+## This is an analysis of the effect of metformin on COVID-19 mortality 
+```{r, echo=FALSE}
+#### load function 
+glmcompileR <- function(DT, key, significant){
+  compiled_dt <- data.table()
+  # pb <- txtProgressBar(min = 0, max = length(key), style = 3)
+  for(m in 2:length(key)){
+    #### subset data table to contain only required columns
+    spl <- strsplit(key[m], split = "_")[[1]]
+    spl <- spl[!spl == "0"]
+    newdt <- data.table()
+    for(i in 1:length(spl)){
+      temp <- DT[,c(as.numeric(spl[i])), with = FALSE]
+      newdt <- cbind(newdt, temp)
+      }
+    #### add outcome variable to last column 
+    newdt$Outcome <- DT$Outcome
+    
+    #### generate formula 
+    nam <- colnames(newdt[, -(ncol(newdt)), with = FALSE])
+    if(length(nam) > 1){
+      plus <- "+"
+      p1 <- paste(nam[-length(nam)], plus, sep = " ")
+      p2 <- paste(p1, nam[length(nam)])
+      fmla <- as.formula(paste0(colnames(newdt)[ncol(newdt)], " ~ ", p2))
+    }else{
+      fmla <- as.formula(paste0(colnames(newdt)[ncol(newdt)], " ~ ", nam))
+      }
+    
+    #### fit glm model
+    glm.fit <- glm(fmla, data=newdt, family = binomial)
+    
+    #### create data table 
+    dtf <- data.table(coef(summary(glm.fit)))[,"Pr(>|z|)"]
+    dtf$names <- rownames(summary(glm.fit)$coefficients)
+    chr <- as.character(glm.fit$formula)
+    dtf$formula <- paste(chr[2], chr[1], chr[3:length(chr)])
+    if(significant == "T"){
+        #### subset data table to retain only significant indepenent variables 
+        dtf <- dtf[dtf$`Pr(>|z|)` < 0.05 & (!dtf$names == "(Intercept)"),]
+    }
+    if(nrow(dtf) > 0){
+      compiled_dt <- rbind(compiled_dt, dtf)
+      }
+    # setTxtProgressBar(pb, m)
+  }
+  # close(pb)
+  compiled_dt <- compiled_dt[!duplicated(compiled_dt[,c(1:3)]),]
+  return(compiled_dt)
+}
+```
+
+
+```{r, echo=FALSE}
+homedir <- "C:/Users/breng/Dropbox/COVID19 metformin"
+setwd(homedir) 
+```
+  
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(ClinicalDataMineR)
+dt <- fread("./data/2020.5.13 English DM COVID19 Spreadsheet.csv")#[,c(1:41)]
+dt <- dt[,c(1:12,14,16,18:32,13,15,17,33:52)]
+```
+
+### format data 
+#### Numeric columns, blanks are replaced with NA
+#### N/A values are replaced with NA
+#### Treatments are transformed into 'Y' or 'N' binary categorical variables
+```{R, message=FALSE, warning=FALSE}
+dt$Outcome <- gsub("D", "0", dt$Outcome)
+dt$Outcome <- gsub("S", "1", dt$Outcome)
+dt$Outcome <- as.numeric(dt$Outcome)
+dt$Weight <- as.numeric(dt$Weight)
+dt$O2_Saturation <- gsub("%", "", dt$O2_Saturation)
+dt$O2_Saturation <- as.numeric(dt$O2_Saturation)
+dt$HbA1C <- gsub("%", "", dt$HbA1C)
+dt$HbA1C <- as.numeric(dt$HbA1C)
+colnames(dt)[2] <- "ID"
+colnames(dt)
+dt[dt==''|dt==' ']<-"N"
+#### Replace N/A with NA
+dt[dt=='N/A']<-NA
+#### convert columns into a binary classification
+dt[grep("[A-Za-z][A-Za-z]", dt$`Secretagogues A`),]$`Secretagogues A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Secretagogues B`),]$`Secretagogues B` <- "Y"
+dt[dt$Meds_ACEI_ARB == "No meds",]$Meds_ACEI_ARB <- "N"
+dt[grep("[A-Za-z][A-Za-z]", dt$Meds_ACEI_ARB),]$Meds_ACEI_ARB <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Glycosidase_inhibitors A`),]$`Glycosidase_inhibitors A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Glycosidase_inhibitors B`),]$`Glycosidase_inhibitors B` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`DPP4_inhibitor B`),]$`DPP4_inhibitor B` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`DPP4_inhibitor A`),]$`DPP4_inhibitor A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`TZD A`)]$`TZD A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`TZD B`)]$`TZD B` <- "Y"
+dt[grep("[0-9]", dt$Smoking_history),]$Smoking_history <- "Y"
+dt[grep("[0-9]", dt$Hypertension),]$Hypertension <- "Y"
+dt[grep("[0-9]", dt$CAD_years),]$CAD_years <- "Y"
+str(dt)
+```
+  
+### Record counts
+```{r, message=FALSE, warning=FALSE}
+frequenciesdyn("dt", "MRN")
+frequenciesdyn("dt", "ID")
+frequenciesdyn("dt", "ID, MRN")
+frequenciesdyn("dt", "Outcome")
+frequenciesdyn("dt", "Intervention")
+frequenciesdyn("dt", "Sex")
+frequenciesdyn("dt", "Age")
+frequenciesdyn("dt", "Diagnosis")
+frequenciesdyn("dt", "Smoking_history")
+frequenciesdyn("dt", "OSA")
+```
+
+#### Number of people taking metformin before and after admission
+```{r, message=FALSE, warning=FALSE}
+dt$`Metformin A`
+length(dt[dt$`Metformin A` == "Y",]$`Metformin A`)
+
+#### outcomes of people taking metformin before admission
+dt[dt$`Metformin B` == "Y",]$Outcome
+#### outcomes of people taking metformin after admission
+dt[dt$`Metformin A` == "Y",]$Outcome
+#### overlap between people taking metformin before and after admission
+dt[dt$`Metformin B` == "Y" & dt$`Metformin A` == "Y",]$Outcome
+intersect(dt[dt$`Metformin B` == "Y",]$MRN, dt[dt$`Metformin A` == "Y",]$MRN)
+
+#### people not taking metformin prior to admission but taking it after admission
+dt[(!dt$`Metformin B` == "Y") & dt$`Metformin A` == "Y",]$Outcome
+dt[(!dt$`Metformin B` == "Y") & dt$`Metformin A` == "Y",]$MRN
+
+#### people taking metformin prior to admission but not after admission
+dt[(dt$`Metformin B` == "Y") & (!dt$`Metformin A` == "Y"),]$Outcome
+dt[(dt$`Metformin B` == "Y") & (!dt$`Metformin A` == "Y"),]$MRN
+length(dt[dt$`Metformin A` == "Y",]$Outcome)
+
+glm.fit <- glm(Outcome ~ `Metformin A`, data = dt, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ `Metformin B`, data = dt, family = binomial); summary(glm.fit)
+
+dt[dt$`Metformin B` == "Y",]$Outcome
+dt[dt$`Metformin A` == "Y",]$Outcome
+```
+
+
+### perform logistic regression on all combinations of diabetic medications and steroids
+```{r, message=FALSE, warning=FALSE}
+dt_sub <- dt[,c("Insulin B", "Metformin B", "Secretagogues B",
+                "TZD B", "Glycosidase_inhibitors B",  "DPP4_inhibitor B",
+                 "Insulin A", "Metformin A",  "Secretagogues A",
+                "TZD A",  "Glycosidase_inhibitors A", "DPP4_inhibitor A",
+                 "Steroid use", "Intervention", "Outcome")]
+colnames(dt_sub) <- gsub(" ", "_", colnames(dt_sub))
+# write.table(dt_sub, "./results/1 subsetted_data_table.xls", row.names=FALSE, quote=FALSE, sep="\t")
+```
+
+#### Generate all combinations of columns ####
+```{r, message=FALSE, warning=FALSE}
+comb <- do.call(CJ, replicate(13, 0:1, FALSE))
+comb[comb$V1 == 1, ]$V1 <- 1
+comb[comb$V2 == 1, ]$V2 <- 2
+comb[comb$V3 == 1, ]$V3 <- 3
+comb[comb$V4 == 1, ]$V4 <- 4
+comb[comb$V5 == 1, ]$V5 <- 5
+comb[comb$V6 == 1, ]$V6 <- 6
+comb[comb$V7 == 1, ]$V7 <- 7
+comb[comb$V8 == 1, ]$V8 <- 8
+comb[comb$V9 == 1, ]$V9 <- 9
+comb[comb$V10 == 1, ]$V10 <- 10
+comb[comb$V11 == 1, ]$V11 <- 11
+comb[comb$V12 == 1, ]$V12 <- 12
+comb[comb$V13 == 1, ]$V13 <- 13
+#### create key ####
+comb[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb)]
+k <- comb$key
+```
+
+### identify models that are significant
+```{r, message=FALSE, warning=FALSE}
+compiled_dt <- glmcompileR(DT=dt_sub, key = k, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/2 complete_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+```
+
+#### Metformin monotherapy 
+```{r, message=FALSE, warning=FALSE}
+met <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+              (!dt_sub$`Secretagogues_A` == "Y") &
+              (!dt_sub$`TZD_A` == "Y") &
+              (!dt_sub$`Glycosidase_inhibitors_A` == "Y") &
+              (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+              (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/3 metformin_monotherapy_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_A`, data = met, family = binomial); summary(glm.fit)
+
+met <- dt_sub[(!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_B` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/4 metformin_monotherapy_B_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_B`, data = met, family = binomial); summary(glm.fit)
+
+#### metformin monotherapy before and after
+met <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_A` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$Steroid_use == "Y") &
+                (!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_B` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/5 metformin_monotherapy_BA_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_B`, data = met, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ `Metformin_A`, data = met, family = binomial); summary(glm.fit)
+```
+
+#### Select people not taking metformin but taking other diabetic medications
+```{r, message=FALSE, warning=FALSE}
+nomet <- dt_sub[(!dt_sub$`Metformin_A` == "Y"),]
+nomet$other <- "no_other"
+nomet[(nomet$`Insulin_A` == "Y")|(nomet$`Secretagogues_A` == "Y")|(nomet$`TZD_A` == "Y")|(nomet$`Glycosidase_inhibitors_A` == "Y")|(nomet$`DPP4_inhibitor_A` == "Y"),]$other <- "other"
+#nomet
+glm.fit <- glm(Outcome ~ other, data = nomet, family = binomial); summary(glm.fit)
+
+```
+
+#### Select people not taking metformin but taking other diabetic medications and steroids 
+```{r, message=FALSE, warning=FALSE}
+nomet <- dt_sub[(!dt_sub$`Metformin_A` == "Y"),]
+nomet$other <- "no_other"
+nomet[(nomet$`Insulin_A` == "Y")|(nomet$`Secretagogues_A` == "Y")|(nomet$`TZD_A` == "Y")|(nomet$`Glycosidase_inhibitors_A` == "Y")|(nomet$`DPP4_inhibitor_A` == "Y")|(nomet$Steroid_use == "Y"),]$other <- "other"
+#nomet
+# write.table(nomet, "./results/6 no_metformin_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = nomet, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+nomet <- nomet[nomet$other == "other",]
+nomet2 <- nomet[,c(1,3, 5:7, 9:16), with = FALSE]
+#nomet2
+# write.table(nomet2, "./results/7 no_metformin_multivariant_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=nomet2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/8 no_met_complete_compiled_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+```
+
+
+
+#### Select people taking Acarbos monotherapy
+```{r, message=FALSE, warning=FALSE}
+#### acarbose monotherapy after
+aca <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$Metformin_A == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/9 Acarbose_monotherapy_dt_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_A`, data = aca, family = binomial); summary(glm.fit)
+
+#### acarbose monotherapy before
+aca <- dt_sub[(!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$Metformin_B == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/10 Acarbose_monotherapy_dt_B.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_A`, data = aca, family = binomial); summary(glm.fit)
+
+#### Acarbose monotherapy before and after
+aca <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$Metformin_A == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$Metformin_B == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/11 Acarbose_monotherapy_dt_BA.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_A`, data = aca, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_B`, data = aca, family = binomial); summary(glm.fit)
+
+```
+
+
+#### Select people taking no Acarbose but other antidiabetic medications or steroids
+```{r, message=FALSE, warning=FALSE}
+#### no Acarbose taking others after
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_A == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_A` == "Y")|
+        (noaca$`Secretagogues_A` == "Y")|
+        (noaca$`TZD_A` == "Y")|
+        (noaca$`Glycosidase_inhibitors_A` == "Y")|
+        (noaca$Metformin_A == "Y")|
+        (noaca$`DPP4_inhibitor_A` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# write.table(noaca, "./results/12 no_Acarbose_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 5:9, 12:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/13 no_Acarbose_multivariant_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/14 no_Acarbose_complete_compiled_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+
+#### no Acarbose but taking other medications before
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_B == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_B` == "Y")|
+        (noaca$`Secretagogues_B` == "Y")|
+        (noaca$`TZD_B` == "Y")|
+        (noaca$`Glycosidase_inhibitors_B` == "Y")|
+        (noaca$Metformin_B == "Y")|
+        (noaca$`DPP4_inhibitor_B` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# write.table(noaca, "./results/15 no_Acarbose_before_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 6:9, 11:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/16 no_Acarbose_before_multivariant_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/17 no_Acarbosee_before_complete_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+
+#### no Acarbose taking others before and after
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_B == "Y"),]
+noaca <- noaca[(!noaca$Glycosidase_inhibitors_A == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_B` == "Y")|
+        (noaca$`Secretagogues_B` == "Y")|
+        (noaca$`TZD_B` == "Y")|
+        (noaca$Metformin_B == "Y")|
+        (noaca$`Glycosidase_inhibitors_B` == "Y")|
+        (noaca$`DPP4_inhibitor_B` == "Y")|
+        (noaca$`Insulin_A` == "Y")|
+        (noaca$`Secretagogues_A` == "Y")|
+        (noaca$`TZD_A` == "Y")|
+        (noaca$Metformin_A == "Y")|
+        (noaca$`Glycosidase_inhibitors_A` == "Y")|
+        (noaca$`DPP4_inhibitor_A` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# noaca
+# write.table(noaca, "./results/18 no_Acarbosee_before_after_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(9, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 6:9, 12:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/19 no_Acarbose_before_after_multivariant_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/20 no_Acarbose_before_after_complete_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+```
+
+
+
+
+
+#### Select only people taking glycosidase before and after therapy
+```{r, message=FALSE, warning=FALSE}
+dt_sub$glyco_diff <- "NA"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$glyco_diff <- "Before_After"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "N"),]$glyco_diff <- "Before"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$glyco_diff <- "After"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "N"),]$glyco_diff <- "Never"
+dt_sub[dt_sub$glyco_diff == "NA",]$glyco_diff <- "After"
+write.table(dt_sub, "./results/21 glyco_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_sub$Before_After <- "N"
+dt_sub$Before <- "N"
+dt_sub$After <- "N"
+dt_sub$Never <- "N"
+dt_sub[dt_sub$glyco_diff == "Before_After",]$Before_After <- "Y"
+dt_sub[dt_sub$glyco_diff == "Before",]$Before <- "Y"
+dt_sub[dt_sub$glyco_diff == "After",]$After <- "Y"
+dt_sub[dt_sub$glyco_diff == "Never",]$Never <- "Y"
+write.table(dt_sub, "./results/22 glyco_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_glyco <- dt_sub[,c(17:20,14:15)]
+#dt_glyco
+#### Generate all combinations of columns ####
+comb <- do.call(CJ, replicate(4, 0:1, FALSE))
+comb[comb$V1 == 1, ]$V1 <- 1
+comb[comb$V2 == 1, ]$V2 <- 2
+comb[comb$V3 == 1, ]$V3 <- 3
+comb[comb$V4 == 1, ]$V4 <- 4
+#### create key ####
+comb[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb)]
+k3 <- comb$key
+
+compiled <- glmcompileR(DT = dt_glyco, key = k3, significant = "F")
+compiled
+# write.table(compiled, "./results/23 glyco_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled)
+```
+
+#### adjust columns to include people taking glycosidase inhibitors before and after in the before or after calculations 
+```{r, message=FALSE, warning=FALSE}
+dt_sub$pre <- "N"
+dt_sub$post <- "N"
+#### pre/post and pre
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y")|
+         (dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "N"),]$pre <- "Y"
+#### pre/post and post
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y")|
+         (dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$post <- "Y"
+# write.table(dt_sub, "./results/24 glyco_grouped.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+glm.fit <- glm(Outcome ~ pre, data = dt_sub, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ post, data = dt_sub, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ pre + post, data = dt_sub, family = binomial); summary(glm.fit)
+
+```
+
+
+#### Select people taking metformin before and after therapy
+```{r, message=FALSE, warning=FALSE}
+dt_sub$met_diff <- "NA"
+dt_sub[(dt_sub$Metformin_B == "Y" & dt_sub$Metformin_A == "Y"),]$met_diff <- "Before_After"
+dt_sub[(dt_sub$Metformin_B == "Y" & dt_sub$Metformin_A == "N"),]$met_diff <- "Before"
+dt_sub[(dt_sub$Metformin_B == "N" & dt_sub$Metformin_A == "Y"),]$met_diff <- "After"
+dt_sub[(dt_sub$Metformin_B == "N" & dt_sub$Metformin_A == "N"),]$met_diff <- "Never"
+# dt_sub[dt_sub$glyco_met == "NA",]$met_diff <- "After"
+write.table(dt_sub, "./results/25 met_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_sub$met_Before_After <- "N"
+dt_sub$met_Before <- "N"
+dt_sub$met_After <- "N"
+dt_sub$met_Never <- "N"
+dt_sub[dt_sub$met_diff == "Before_After",]$met_Before_After <- "Y"
+dt_sub[dt_sub$met_diff == "Before",]$met_Before <- "Y"
+dt_sub[dt_sub$met_diff == "After",]$met_After <- "Y"
+dt_sub[dt_sub$met_diff == "Never",]$met_Never <- "Y"
+# write.table(dt_sub, "./results/26 met_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_met <- dt_sub[,c(24,27,14:15)]
+#dt_met
+#### Generate all combinations of columns ####
+comb <- do.call(CJ, replicate(2, 0:1, FALSE))
+comb[comb$V1 == 1, ]$V1 <- 1
+comb[comb$V2 == 1, ]$V2 <- 2
+#### create key ####
+comb[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb)]
+k3 <- comb$key
+
+compiled <- glmcompileR(DT = dt_met, key = k3, significant = "F")
+compiled
+# write.table(compiled, "./results/27 met_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled)
+```
+
+
+
+
+
+
+
+
+# Repeat with intervention as the outcome 
+```{r, message=FALSE, warning=FALSE}
+dt <- fread("./data/2020.5.13 English DM COVID19 Spreadsheet.csv")#[,c(1:41)]
+dt <- dt[,c(1:12,14,16,18:32,13,15,17,33:52)]
+# dt$Outcome <- gsub("D", "0", dt$Outcome)
+# dt$Outcome <- gsub("S", "1", dt$Outcome)
+# dt$Outcome <- as.numeric(dt$Outcome)
+dt$Weight <- as.numeric(dt$Weight)
+dt$O2_Saturation <- gsub("%", "", dt$O2_Saturation)
+dt$O2_Saturation <- as.numeric(dt$O2_Saturation)
+dt$HbA1C <- gsub("%", "", dt$HbA1C)
+dt$HbA1C <- as.numeric(dt$HbA1C)
+colnames(dt)[2] <- "ID"
+colnames(dt)
+dt[dt==''|dt==' ']<-"N"
+#### Replace N/A with NA
+dt[dt=='N/A']<-NA
+#### convert columns into a binary classification
+dt[grep("[A-Za-z][A-Za-z]", dt$`Secretagogues A`),]$`Secretagogues A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Secretagogues B`),]$`Secretagogues B` <- "Y"
+dt[dt$Meds_ACEI_ARB == "No meds",]$Meds_ACEI_ARB <- "N"
+dt[grep("[A-Za-z][A-Za-z]", dt$Meds_ACEI_ARB),]$Meds_ACEI_ARB <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Glycosidase_inhibitors A`),]$`Glycosidase_inhibitors A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`Glycosidase_inhibitors B`),]$`Glycosidase_inhibitors B` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`DPP4_inhibitor B`),]$`DPP4_inhibitor B` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`DPP4_inhibitor A`),]$`DPP4_inhibitor A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`TZD A`)]$`TZD A` <- "Y"
+dt[grep("[A-Za-z][A-Za-z]", dt$`TZD B`)]$`TZD B` <- "Y"
+dt[grep("[0-9]", dt$Smoking_history),]$Smoking_history <- "Y"
+dt[grep("[0-9]", dt$Hypertension),]$Hypertension <- "Y"
+dt[grep("[0-9]", dt$CAD_years),]$CAD_years <- "Y"
+str(dt)
+dt_sub <- dt[,c("Insulin B", "Metformin B", "Secretagogues B",
+                "TZD B", "Glycosidase_inhibitors B",  "DPP4_inhibitor B",
+                "Insulin A", "Metformin A",  "Secretagogues A",
+                "TZD A",  "Glycosidase_inhibitors A", "DPP4_inhibitor A",
+                "Steroid use", "Intervention", "Outcome")]
+colnames(dt_sub) <- gsub(" ", "_", colnames(dt_sub))
+
+setnames(dt_sub, colnames(dt_sub), c("Insulin_B",  "Metformin_B",  "Secretagogues_B",  "TZD_B", "Glycosidase_inhibitors_B", "DPP4_inhibitor_B", "Insulin_A", "Metformin_A",             
+                             "Secretagogues_A","TZD_A", "Glycosidase_inhibitors_A", "DPP4_inhibitor_A",        
+                             "Steroid_use",  "Outcome", "Survival"))
+# dt_sub$Survival <- as.character(dt_sub$Survival)
+# dt_sub[dt_sub$Survival == 1,]$Survival <- "survived"
+# dt_sub[dt_sub$Survival == 0,]$Survival <- "deceased"
+
+dt_sub[!duplicated(dt_sub$Outcome),]$Outcome
+dt_sub[!(dt_sub$Outcome == "Invasive Ventilation" | dt_sub$Outcome == "NIV"),]$Outcome <- "0"
+dt_sub[dt_sub$Outcome == "Invasive Ventilation" | dt_sub$Outcome == "NIV",]$Outcome <- "1"
+dt_sub[!duplicated(dt_sub$Outcome),]$Outcome
+dt_sub$Outcome <- as.numeric(dt_sub$Outcome) 
+# dt_sub
+```
+
+
+### Select people taking metformin monotherapy 
+```{r, message=FALSE, warning=FALSE}
+met <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_A` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/28 vent_metformin_monotherapy_dt_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_A`, data = met, family = binomial); summary(glm.fit)
+
+#### metformin monotherapy before
+met <- dt_sub[(!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_B` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/29 vent_metformin_monotherapy_dt_B.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_B`, data = met, family = binomial); summary(glm.fit)
+
+#### metformin monotherapy before and after
+met <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_A` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$Steroid_use == "Y") &
+                (!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$`Glycosidase_inhibitors_B` == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#met
+# write.table(met, "./results/30 vent_metformin_monotherapy_BA_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Metformin_B`, data = met, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ `Metformin_A`, data = met, family = binomial); summary(glm.fit)
+
+```
+
+
+### Select people taking no metformin but other antidiabetic medications or steroids 
+```{r, message=FALSE, warning=FALSE}
+#### no metformin after
+nomet <- dt_sub[(!dt_sub$`Metformin_A` == "Y"),]
+nomet$other <- "no_other"
+nomet[(nomet$`Insulin_A` == "Y")|(nomet$`Secretagogues_A` == "Y")|(nomet$`TZD_A` == "Y")|(nomet$`Glycosidase_inhibitors_A` == "Y")|(nomet$`DPP4_inhibitor_A` == "Y")|(nomet$Steroid_use == "Y"),]$other <- "other"
+#nomet
+# write.table(nomet, "./results/31 vent_no_metformin_dt_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = nomet, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+nomet <- nomet[nomet$other == "other",]
+nomet2 <- nomet[,c(1,3, 5:7, 9:16), with = FALSE]
+#nomet2
+# write.table(nomet2, "./results/32 vent_no_metformin_multivariant_dt_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+# compiled_dt <- glmcompileR(DT=nomet2, key = k2, significant = "T")
+# compiled_dt
+# write.table(compiled_dt, "./results/33 vent_no_met_complete_compiled_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+# rm(compiled_dt)
+```
+
+
+### select for people taking Acarbose monotherapy 
+```{r, message=FALSE, warning=FALSE}
+#### acarbose monotherapy after
+aca <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$Metformin_A == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/34 vent_Acarbose_monotherapy_dt_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_A`, data = aca, family = binomial); summary(glm.fit)
+
+#### acarbose monotherapy before
+aca <- dt_sub[(!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$Metformin_B == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/35 vent_Acarbose_monotherapy_dt_B.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_B`, data = aca, family = binomial); summary(glm.fit)
+
+#### Acarbose monotherapy before and after
+aca <- dt_sub[(!dt_sub$`Insulin_A` == "Y") &
+                (!dt_sub$`Secretagogues_A` == "Y") &
+                (!dt_sub$`TZD_A` == "Y") &
+                (!dt_sub$Metformin_A == "Y") &
+                (!dt_sub$`DPP4_inhibitor_A` == "Y") &
+                (!dt_sub$`Insulin_B` == "Y") &
+                (!dt_sub$`Secretagogues_B` == "Y") &
+                (!dt_sub$`TZD_B` == "Y") &
+                (!dt_sub$Metformin_B == "Y") &
+                (!dt_sub$`DPP4_inhibitor_B` == "Y") &
+                (!dt_sub$Steroid_use == "Y"),]
+#aca
+# write.table(aca, "./results/36 vent_Acarbose_monotherapy_AB_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_A`, data = aca, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ `Glycosidase_inhibitors_B`, data = aca, family = binomial); summary(glm.fit)
+
+```
+
+
+### Select for people not taking Acarbose but taking other antidiabetic medications or steroids. 
+```{r, message=FALSE, warning=FALSE}
+#### no Acarbose taking others after
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_A == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_A` == "Y")|
+        (noaca$`Secretagogues_A` == "Y")|
+        (noaca$`TZD_A` == "Y")|
+        (noaca$`Glycosidase_inhibitors_A` == "Y")|
+        (noaca$Metformin_A == "Y")|
+        (noaca$`DPP4_inhibitor_A` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# write.table(noaca, "./results/37 vent_no_Acarbose_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 5:9, 12:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/38 vent_no_Acarbose_multivariant_A_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/39 vent_no_Acarbose_complete_compiled_A.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+
+#### no Acarbose but taking other antidiabetic medications or steroids before
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_B == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_B` == "Y")|
+        (noaca$`Secretagogues_B` == "Y")|
+        (noaca$`TZD_B` == "Y")|
+        (noaca$`Glycosidase_inhibitors_B` == "Y")|
+        (noaca$Metformin_B == "Y")|
+        (noaca$`DPP4_inhibitor_B` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# write.table(noaca, "./results/40 vent_no_Acarbose_before_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(10, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+comb2[comb2$V10 == 1, ]$V10 <- 10
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 6:9, 11:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/41 vent_no_Acarbose_before_multivariant_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/42 vent_no_Acarbosee_before_complete_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+
+#### People not on Acarbose but taking other antidiabetic medications or steroids before and after
+noaca <- dt_sub[(!dt_sub$Glycosidase_inhibitors_B == "Y"),]
+noaca <- noaca[(!noaca$Glycosidase_inhibitors_A == "Y"),]
+noaca$other <- "no_other"
+noaca[(noaca$`Insulin_B` == "Y")|
+        (noaca$`Secretagogues_B` == "Y")|
+        (noaca$`TZD_B` == "Y")|
+        (noaca$Metformin_B == "Y")|
+        (noaca$`Glycosidase_inhibitors_B` == "Y")|
+        (noaca$`DPP4_inhibitor_B` == "Y")|
+        (noaca$`Insulin_A` == "Y")|
+        (noaca$`Secretagogues_A` == "Y")|
+        (noaca$`TZD_A` == "Y")|
+        (noaca$Metformin_A == "Y")|
+        (noaca$`Glycosidase_inhibitors_A` == "Y")|
+        (noaca$`DPP4_inhibitor_A` == "Y")|
+        (noaca$Steroid_use == "Y"),]$other <- "other"
+# noaca
+# write.table(noaca, "./results/43 vent_no_Acarbosee_before_after_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+glm.fit <- glm(Outcome ~ other, data = noaca, family = binomial); summary(glm.fit)
+
+#### Generate all combinations of columns ####
+comb2 <- do.call(CJ, replicate(9, 0:1, FALSE))
+comb2[comb2$V1 == 1, ]$V1 <- 1
+comb2[comb2$V2 == 1, ]$V2 <- 2
+comb2[comb2$V3 == 1, ]$V3 <- 3
+comb2[comb2$V4 == 1, ]$V4 <- 4
+comb2[comb2$V5 == 1, ]$V5 <- 5
+comb2[comb2$V6 == 1, ]$V6 <- 6
+comb2[comb2$V7 == 1, ]$V7 <- 7
+comb2[comb2$V8 == 1, ]$V8 <- 8
+comb2[comb2$V9 == 1, ]$V9 <- 9
+#### create key ####
+comb2[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb2)]
+k2 <- comb2$key
+noaca <- noaca[noaca$other == "other",]
+noaca2 <- noaca[,c(1:3, 6:9, 12:16), with = FALSE]
+#noaca2
+# write.table(noaca2, "./results/44 vent_no_Acarbose_before_after_multivariant_dt.xls", row.names=FALSE, quote=FALSE, sep="\t")
+compiled_dt <- glmcompileR(DT=noaca2, key = k2, significant = "T")
+compiled_dt
+# write.table(compiled_dt, "./results/45 vent_no_Acarbose_before_after_complete_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled_dt)
+```
+
+
+### Select people taking glycosidase before and after therapy 
+```{r, message=FALSE, warning=FALSE}
+dt_sub$glyco_diff <- "NA"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$glyco_diff <- "Before_After"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "N"),]$glyco_diff <- "Before"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$glyco_diff <- "After"
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "N"),]$glyco_diff <- "Never"
+dt_sub[dt_sub$glyco_diff == "NA",]$glyco_diff <- "After"
+# write.table(dt_sub, "./results/46 vent_glyco_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_sub$Before_After <- "N"
+dt_sub$Before <- "N"
+dt_sub$After <- "N"
+dt_sub$Never <- "N"
+dt_sub[dt_sub$glyco_diff == "Before_After",]$Before_After <- "Y"
+dt_sub[dt_sub$glyco_diff == "Before",]$Before <- "Y"
+dt_sub[dt_sub$glyco_diff == "After",]$After <- "Y"
+dt_sub[dt_sub$glyco_diff == "Never",]$Never <- "Y"
+# write.table(dt_sub, "./results/47 vent_glyco_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_glyco <- dt_sub[,c(17:20,14:15)]
+#dt_glyco
+#### Generate all combinations of columns ####
+comb <- do.call(CJ, replicate(4, 0:1, FALSE))
+comb[comb$V1 == 1, ]$V1 <- 1
+comb[comb$V2 == 1, ]$V2 <- 2
+comb[comb$V3 == 1, ]$V3 <- 3
+comb[comb$V4 == 1, ]$V4 <- 4
+#### create key ####
+comb[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb)]
+k3 <- comb$key
+
+compiled <- glmcompileR(DT = dt_glyco, key = k3, significant = "F")
+compiled
+# write.table(compiled, "./results/48 vent_glyco_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled)
+```
+
+
+### adjust columns to include people taking glycosidase inhibitors before and after in the before or after calculations
+```{r, message=FALSE, warning=FALSE}
+dt_sub$pre <- "N"
+dt_sub$post <- "N"
+#### pre/post and pre
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y")|
+         (dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "N"),]$pre <- "Y"
+#### pre/post and post
+dt_sub[(dt_sub$Glycosidase_inhibitors_B == "Y" & dt_sub$Glycosidase_inhibitors_A == "Y")|
+         (dt_sub$Glycosidase_inhibitors_B == "N" & dt_sub$Glycosidase_inhibitors_A == "Y"),]$post <- "Y"
+# write.table(dt_sub, "./results/49 vent_glyco_grouped.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+glm.fit <- glm(Outcome ~ pre, data = dt_sub, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ post, data = dt_sub, family = binomial); summary(glm.fit)
+glm.fit <- glm(Outcome ~ pre + post, data = dt_sub, family = binomial); summary(glm.fit)
+
+
+```
+
+
+### Select people taking metformin before and after therapy 
+```{r, message=FALSE, warning=FALSE}
+dt_sub$met_diff <- "NA"
+dt_sub[(dt_sub$Metformin_B == "Y" & dt_sub$Metformin_A == "Y"),]$met_diff <- "Before_After"
+dt_sub[(dt_sub$Metformin_B == "Y" & dt_sub$Metformin_A == "N"),]$met_diff <- "Before"
+dt_sub[(dt_sub$Metformin_B == "N" & dt_sub$Metformin_A == "Y"),]$met_diff <- "After"
+dt_sub[(dt_sub$Metformin_B == "N" & dt_sub$Metformin_A == "N"),]$met_diff <- "Never"
+# dt_sub[dt_sub$glyco_met == "NA",]$met_diff <- "After"
+# write.table(dt_sub, "./results/50 vent_met_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_sub$met_Before_After <- "N"
+dt_sub$met_Before <- "N"
+dt_sub$met_After <- "N"
+dt_sub$met_Never <- "N"
+dt_sub[dt_sub$met_diff == "Before_After",]$met_Before_After <- "Y"
+dt_sub[dt_sub$met_diff == "Before",]$met_Before <- "Y"
+dt_sub[dt_sub$met_diff == "After",]$met_After <- "Y"
+dt_sub[dt_sub$met_diff == "Never",]$met_Never <- "Y"
+write.table(dt_sub, "./results/51 vent_met_annotated.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+dt_met <- dt_sub[,c(24,27,14:15)]
+#dt_met
+#### Generate all combinations of columns ####
+comb <- do.call(CJ, replicate(2, 0:1, FALSE))
+comb[comb$V1 == 1, ]$V1 <- 1
+comb[comb$V2 == 1, ]$V2 <- 2
+#### create key ####
+comb[, key := do.call(paste, c(.SD, sep = "_")), .SDcols = names(comb)]
+k3 <- comb$key
+
+compiled <- glmcompileR(DT = dt_met, key = k3, significant = "F")
+compiled
+# write.table(compiled, "./results/52 vent_met_compiled.xls", row.names=FALSE, quote=FALSE, sep="\t")
+rm(compiled)
+
+```
+
+
